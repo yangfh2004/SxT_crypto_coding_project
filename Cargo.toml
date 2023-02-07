@@ -11,4 +11,5 @@ ark-linear-sumcheck = {git="https://github.com/yangfh2004/sumcheck.git"}
 ark-poly = "0.4.0"
 ark-std = "0.4.0"
 ark-ff = "0.4.0"
+rand = "0.8.5"
 anyhow = "1.0.69"
