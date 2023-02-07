@@ -4,16 +4,17 @@ use anyhow::{anyhow, Context, Result};
 use ark_curve25519::Fr;
 use ark_ff::biginteger::BigInteger256;
 use ark_ff::PrimeField;
-use ark_linear_sumcheck::ml_sumcheck::protocol::ListOfProductsOfPolynomials;
+use ark_linear_sumcheck::ml_sumcheck::protocol::{ListOfProductsOfPolynomials, PolynomialInfo};
 use ark_linear_sumcheck::ml_sumcheck::{MLSumcheck, Proof};
 use ark_linear_sumcheck::Error as SumCheckError;
 use ark_poly::DenseMultilinearExtension;
 use ark_std::rand;
 use ark_std::rand::{Rng, SeedableRng};
-use ark_std::One;
+use ark_std::{Zero, One};
 use generic::{Data, TableOperation};
 use std::collections::HashMap;
 use std::rc::Rc;
+use ark_linear_sumcheck::ml_sumcheck::protocol::verifier::SubClaim;
 
 fn main() {
     println!("SxT Crypto Coding!");
@@ -97,18 +98,8 @@ impl Victor {
         }
     }
 
-    pub fn verify_proof(&self, seed: &[u8; 32], proof: &Proof<Fr>, product: Vec<Fr>) -> bool {
-        // generate random vector with seed.
-        let vec_r = generate_random_seed(seed, self.exp);
-        let mle_r = DenseMultilinearExtension::<Fr>::from_evaluations_vec(self.exp, vec_r);
-        let rc_r = Rc::new(mle_r);
-        let mle_p = DenseMultilinearExtension::<Fr>::from_evaluations_vec(self.exp, product);
-        let rc_p = Rc::new(mle_p);
-        let mut list = ListOfProductsOfPolynomials::<Fr>::new(self.exp);
-        let product = vec![rc_r.clone(), rc_p.clone()];
-        list.add_product(product, Fr::one());
-        let sum_check = MLSumcheck::<Fr>::prove(&list).unwrap();
-        MLSumcheck::<Fr>::extract_sum(&sum_check) == MLSumcheck::<Fr>::extract_sum(proof)
+    pub fn verify_proof(&self, proof: &Proof<Fr>, info: &PolynomialInfo, product: Vec<Fr>) ->  Result<SubClaim<Fr>> {
+        MLSumcheck::<Fr>::verify(info, Fr::zero(), proof).context("Cannot verify the proof!")
     }
 }
 
@@ -135,7 +126,7 @@ impl Peggy {
         seed: &[u8; 32],
         a: &str,
         b: &str,
-    ) -> Result<Proof<Fr>, SumCheckError> {
+    ) -> Result<(Proof<Fr>, PolynomialInfo), SumCheckError> {
         let data = self.data.as_ref();
         let a_string = a.to_string();
         let b_string = b.to_string();
@@ -152,7 +143,34 @@ impl Peggy {
         let mut list = ListOfProductsOfPolynomials::<Fr>::new(data.exp);
         let product = vec![rc_r.clone(), rc_a.clone(), rc_b.clone()];
         list.add_product(product, Fr::one());
-        MLSumcheck::<Fr>::prove(&list)
+        let vec_p = data.product(&a_string, &b_string).unwrap();
+        let mle_p = DenseMultilinearExtension::<Fr>::from_evaluations_vec(data.exp, vec_p);
+        let rc_p = Rc::new(mle_p);
+        let product = vec![rc_r.clone(), rc_p.clone()];
+        list.add_product(product, -Fr::one());
+        let info = list.info();
+        let proof = MLSumcheck::<Fr>::prove(&list)?;
+        Ok((proof, info))
+    }
+}
+
+struct Penelope {
+    data: Rc<Data<Fr>>,
+}
+
+impl Penelope {
+    pub fn new(data: Rc<Data<Fr>>) -> Self {
+        Self {
+            data
+        }
+    }
+
+    pub fn generate_eval(&self, col: &str, idx: usize) -> Fr {
+        let data = self.data.as_ref();
+        let col_string = col.to_string();
+        let vec = data.get(&col_string).unwrap().to_vec();
+        let mle = DenseMultilinearExtension::<Fr>::from_evaluations_vec(data.exp, vec);
+        mle.evaluations[idx].clone()
     }
 }
 
@@ -198,16 +216,18 @@ mod tests {
         data.add_column("B", Some(vec_b));
         let data = Rc::new(data);
         let peggy = Peggy::new(data.clone());
-        // victor request product from peggy.
+        // step 2: victor request product from peggy.
         let request_product = peggy.compute_product("A", "B");
-        // victor generate a seed and send it to peggy.
+        // step 3: victor generate a seed and send it to peggy.
         let victor_seed = [
             1, 2, 4, 8, 23, 0, 0, 0, 200, 1, 0, 0, 210, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 123,
         ];
-        let proof = peggy.generate_proof(&victor_seed, "A", "B").unwrap();
-        // victor verify the proof.
-        let res = victor.verify_proof(&victor_seed, &proof, request_product);
-        assert!(res, "Proof is not valid!");
+        // step 4 & 5.
+        let (proof, info) = peggy.generate_proof(&victor_seed, "A", "B").unwrap();
+        assert_eq!(MLSumcheck::<Fr>::extract_sum(&proof), Fr::zero(), "Sum is not zero");
+        // step 6: victor verify the proof.
+        victor.verify_proof(&proof, &info, request_product).unwrap();
+        // victor
     }
 }
