@@ -7,7 +7,7 @@ use ark_ff::PrimeField;
 use ark_linear_sumcheck::ml_sumcheck::protocol::{ListOfProductsOfPolynomials, PolynomialInfo};
 use ark_linear_sumcheck::ml_sumcheck::{MLSumcheck, Proof};
 use ark_linear_sumcheck::Error as SumCheckError;
-use ark_poly::DenseMultilinearExtension;
+use ark_poly::{DenseMultilinearExtension, MultilinearExtension};
 use ark_std::rand::rngs::StdRng;
 use ark_std::rand::{Rng, SeedableRng};
 use ark_std::{Zero, One};
@@ -92,6 +92,7 @@ struct Victor {
     exp: usize,
 }
 
+#[allow(dead_code)]
 impl Victor {
     pub fn new(exp: usize) -> Self {
         Self {
@@ -173,12 +174,12 @@ impl Penelope {
         }
     }
 
-    pub fn generate_eval(&self, col: &str, idx: usize) -> Fr {
+    pub fn generate_eval(&self, col: &str, q: &[Fr]) -> Fr {
         let data = self.data.as_ref();
         let col_string = col.to_string();
         let vec = data.get(&col_string).unwrap().to_vec();
         let mle = DenseMultilinearExtension::<Fr>::from_evaluations_vec(data.exp, vec);
-        mle.evaluations[idx].clone()
+        mle.evaluate(q).unwrap()
     }
 }
 
@@ -236,19 +237,21 @@ mod tests {
         let (proof, info) = peggy.generate_proof(&victor_seed, "A", "B", request_product.clone()).unwrap();
         assert_eq!(MLSumcheck::<Fr>::extract_sum(&proof), Fr::zero(), "Sum is not zero");
         // step 6: victor verify the proof.
-        victor.verify_proof(&proof, &info).unwrap();
+        let sub = victor.verify_proof(&proof, &info).unwrap();
         // step 7: victor generate a random index q.
-        let q = victor.gen_random();
+        let q = sub.point;
         // step 8: evaluations
         let penelope = Penelope::new(data.clone());
-        let aq = penelope.generate_eval("A", q);
-        let bq = penelope.generate_eval("B", q);
+        let aq = penelope.generate_eval("A", &q);
+        let bq = penelope.generate_eval("B", &q);
         // step 9
         let vec_r = gen_random_from_seed(&victor_seed, data.exp);
-        let rq = vec_r[q].clone();
-        let pq = request_product[q].clone();
+        let mle_r = DenseMultilinearExtension::<Fr>::from_evaluations_vec(data.exp, vec_r);
+        let rq = mle_r.evaluate(&q).unwrap();
+        let mle_p = DenseMultilinearExtension::<Fr>::from_evaluations_vec(data.exp, request_product);
+        let pq = mle_p.evaluate(&q).unwrap();
         let fq = rq * (aq * bq - pq);
-        assert_eq!(fq, Fr::zero());
+        assert_eq!(fq, sub.expected_evaluation, "Evaluation does not the expectation.");
     }
 
     #[test]
@@ -276,22 +279,26 @@ mod tests {
             0, 0, 0, 123,
         ];
         // step 4 & 5.
-        let bad_prod: Vec<Fr> = request_product.into_iter().map(|x|x.add(&Fr::one())).collect();
+        let bad_prod: Vec<Fr> = request_product.clone().into_iter().map(|x|x.add(&Fr::one())).collect();
         let (proof, info) = peggy.generate_proof(&victor_seed, "A", "B", bad_prod.clone()).unwrap();
-        assert_ne!(MLSumcheck::<Fr>::extract_sum(&proof), Fr::zero(), "Sum is zero");
+        assert_ne!(MLSumcheck::<Fr>::extract_sum(&proof), Fr::zero(), "Sum should not be zero");
+        // step 6: victor verify the proof.
+        let sub = victor.verify_proof(&proof, &info).unwrap();
         // step 7: victor generate a random index q.
-        let q = victor.gen_random();
+        let q = sub.point;
         // step 8: evaluations
         let penelope = Penelope::new(data.clone());
-        let aq = penelope.generate_eval("A", q);
-        let bq = penelope.generate_eval("B", q);
+        let aq = penelope.generate_eval("A", &q);
+        let bq = penelope.generate_eval("B", &q);
+        // step 9
         // step 9
         let vec_r = gen_random_from_seed(&victor_seed, data.exp);
-        let rq = vec_r[q].clone();
-        let pq = bad_prod[q].clone();
+        let mle_r = DenseMultilinearExtension::<Fr>::from_evaluations_vec(data.exp, vec_r);
+        let rq = mle_r.evaluate(&q).unwrap();
+        let mle_p = DenseMultilinearExtension::<Fr>::from_evaluations_vec(data.exp, request_product);
+        let pq = mle_p.evaluate(&q).unwrap();
         let fq = rq * (aq * bq - pq);
-        assert_ne!(fq, Fr::zero(), "Evaluation is good");
-        // step 6: victor verify the proof.
-        victor.verify_proof(&proof, &info).unwrap();
+        assert_ne!(fq, sub.expected_evaluation, "Evaluation supposes being not good");
+
     }
 }
