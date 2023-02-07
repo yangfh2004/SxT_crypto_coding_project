@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 ark-curve25519 = "0.4.0"
-ark-linear-sumcheck = "0.3.0"
+ark-linear-sumcheck = {git="https://github.com/yangfh2004/sumcheck.git"}
 ark-poly = "0.4.0"
+ark-std = "0.4.0"
+ark-ff = "0.4.0"
 anyhow = "1.0.69"

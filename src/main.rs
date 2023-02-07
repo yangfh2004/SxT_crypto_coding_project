@@ -1,59 +1,213 @@
+mod generic;
+
+use anyhow::{anyhow, Context, Result};
+use ark_curve25519::Fr;
+use ark_ff::biginteger::BigInteger256;
+use ark_ff::PrimeField;
+use ark_linear_sumcheck::ml_sumcheck::protocol::ListOfProductsOfPolynomials;
+use ark_linear_sumcheck::ml_sumcheck::{MLSumcheck, Proof};
+use ark_linear_sumcheck::Error as SumCheckError;
+use ark_poly::DenseMultilinearExtension;
+use ark_std::rand;
+use ark_std::rand::{Rng, SeedableRng};
+use ark_std::One;
+use generic::{Data, TableOperation};
 use std::collections::HashMap;
-use anyhow::{Result, Context, anyhow};
+use std::rc::Rc;
 
-
-struct Data {
-    table: HashMap<String, Vec<i32>>,
+fn main() {
+    println!("SxT Crypto Coding!");
 }
 
-impl Data {
-    pub fn new() -> Self {
+impl TableOperation<Fr> for Data<Fr> {
+    fn new(exp: usize) -> Self {
+        let base: usize = 2;
+        let capacity = if exp > 64 { 64} else { base.pow(exp as u32) };
         Self {
             table: HashMap::new(),
+            capacity,
+            exp,
         }
     }
 
-    pub fn add_column(&mut self, name: &'static str, data: Option<Vec<i32>>) {
+    fn add_column(&mut self, name: &'static str, data: Option<Vec<Fr>>) {
         if let Some(d) = data {
-            self.table.insert(name.to_string(), d);
+            if d.len() > self.capacity {
+                self.table
+                    .insert(name.to_string(), d[..self.capacity].to_vec());
+            } else {
+                self.table.insert(name.to_string(), d);
+            }
         } else {
-            self.table.insert(name.to_string(), Vec::new());
+            self.table
+                .insert(name.to_string(), Vec::with_capacity(self.capacity));
         }
     }
 
-    pub fn product(&self, a: &String, b: &String) -> Result<Vec<i32>>{
-        let a = self.table.get(a).context("Requested column does not exist!")?;
-        let b = self.table.get(b).context("Requested column does not exist!")?;
+    fn product(&self, a: &String, b: &String) -> Result<Vec<Fr>> {
+        let a = self
+            .table
+            .get(a)
+            .context("Requested column does not exist!")?;
+        let b = self
+            .table
+            .get(b)
+            .context("Requested column does not exist!")?;
         if a.len() != b.len() {
             Err(anyhow!("Column length does not match each other!"))
         } else if a.len() > 0 && b.len() > 0 {
-            Ok(a.iter().zip(b.iter()).map(|(a, b)| a*b).collect())
+            Ok(a.iter().zip(b.iter()).map(|(a, b)| a * b).collect())
         } else {
             Ok(Vec::new())
         }
     }
+
+    fn get(&self, col: &String) -> Option<&Vec<Fr>> {
+        self.table.get(col)
+    }
+
+    fn len(&self) -> usize {
+        self.table.len()
+    }
 }
 
+fn generate_random_seed(seed: &[u8; 32], exp: usize) -> Vec<Fr> {
+    // generate random vector with seed.
+    let mut vec_r = Vec::new();
+    let mut rng = rand::rngs::StdRng::from_seed(seed.to_owned());
+    let exp = if exp > 64 { 64 } else { exp };
+    let base: usize = 2;
+    let limit: usize = base.pow(exp as u32);
+    for _ in 0..limit {
+        let random = rng.gen_range(0..limit);
+        let big_int = BigInteger256::from(random as u64);
+        vec_r.push(Fr::from_bigint(big_int).unwrap());
+    }
+    vec_r
+}
 
-fn main() {
-    println!("Hello, world!");
+struct Victor {
+    exp: usize,
+}
+
+impl Victor {
+    pub fn new(exp: usize) -> Self {
+        Self {
+            exp: if exp > 64 { 64 } else { exp },
+        }
+    }
+
+    pub fn verify_proof(&self, seed: &[u8; 32], proof: &Proof<Fr>, product: Vec<Fr>) -> bool {
+        // generate random vector with seed.
+        let vec_r = generate_random_seed(seed, self.exp);
+        let mle_r = DenseMultilinearExtension::<Fr>::from_evaluations_vec(self.exp, vec_r);
+        let rc_r = Rc::new(mle_r);
+        let mle_p = DenseMultilinearExtension::<Fr>::from_evaluations_vec(self.exp, product);
+        let rc_p = Rc::new(mle_p);
+        let mut list = ListOfProductsOfPolynomials::<Fr>::new(self.exp);
+        let product = vec![rc_r.clone(), rc_p.clone()];
+        list.add_product(product, Fr::one());
+        let sum_check = MLSumcheck::<Fr>::prove(&list).unwrap();
+        MLSumcheck::<Fr>::extract_sum(&sum_check) == MLSumcheck::<Fr>::extract_sum(proof)
+    }
+}
+
+struct Peggy {
+    data: Rc<Data<Fr>>,
+}
+
+impl Peggy {
+    pub fn new(data: Rc<Data<Fr>>) -> Self {
+        Self {
+            data
+        }
+    }
+
+    pub fn compute_product(&self, a: &str, b: &str) -> Vec<Fr> {
+        let data = self.data.as_ref();
+        let a_string = a.to_string();
+        let b_string = b.to_string();
+        data.product(&a_string, &b_string).unwrap()
+    }
+
+    pub fn generate_proof(
+        &self,
+        seed: &[u8; 32],
+        a: &str,
+        b: &str,
+    ) -> Result<Proof<Fr>, SumCheckError> {
+        let data = self.data.as_ref();
+        let a_string = a.to_string();
+        let b_string = b.to_string();
+        let vec_a = data.get(&a_string).unwrap().to_vec();
+        let mle_a = DenseMultilinearExtension::<Fr>::from_evaluations_vec(data.exp, vec_a);
+        let rc_a = Rc::new(mle_a);
+        let vec_b = data.get(&b_string).unwrap().to_vec();
+        let mle_b = DenseMultilinearExtension::<Fr>::from_evaluations_vec(data.exp, vec_b);
+        let rc_b = Rc::new(mle_b);
+        // generate random vector with seed.
+        let vec_r = generate_random_seed(seed, data.exp);
+        let mle_r = DenseMultilinearExtension::<Fr>::from_evaluations_vec(data.exp, vec_r);
+        let rc_r = Rc::new(mle_r);
+        let mut list = ListOfProductsOfPolynomials::<Fr>::new(data.exp);
+        let product = vec![rc_r.clone(), rc_a.clone(), rc_b.clone()];
+        list.add_product(product, Fr::one());
+        MLSumcheck::<Fr>::prove(&list)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_std::{One, UniformRand, Zero};
 
     #[test]
-    fn test_data() {
-        let mut d = Data::new();
-        d.add_column("A", Some(vec![1, 2, 3, 4]));
-        d.add_column("B", Some(vec![5, 6, 7, 8]));
+    fn test_data_fr() {
+        let mut d = Data::<Fr>::new(2);
+        let a_data = Some(vec![Fr::one(), Fr::zero(), Fr::one(), Fr::zero()]);
+        d.add_column("A", a_data);
+        let mut rng = ark_std::test_rng();
+        let b_data = Some(vec![
+            Fr::zero(),
+            Fr::rand(&mut rng),
+            Fr::zero(),
+            Fr::rand(&mut rng),
+        ]);
+        d.add_column("B", b_data);
         let col1 = "A".to_string();
         let col2 = "B".to_string();
         let prod = d.product(&col1, &col2).unwrap();
-        let res = vec![5, 12, 21, 32];
-        for (i, p) in prod.iter().enumerate() {
-           assert_eq!(res[i], *p, "Product does match correct results!") ;
+        for p in prod {
+            assert_eq!(p, Fr::zero(), "Product does match correct results!");
         }
+    }
+
+    #[test]
+    fn test_proof(){
+        let exp = 3;
+        let victor = Victor::new(exp);
+        // prepare data
+        let mut data = Data::new(exp);
+        let data_seed = [
+            1, 0, 0, 0, 23, 0, 0, 0, 200, 1, 0, 0, 210, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+        ];
+        let vec_a = generate_random_seed(&data_seed, exp);
+        let vec_b = generate_random_seed(&data_seed, exp);
+        data.add_column("A", Some(vec_a));
+        data.add_column("B", Some(vec_b));
+        let data = Rc::new(data);
+        let peggy = Peggy::new(data.clone());
+        // victor request product from peggy.
+        let request_product = peggy.compute_product("A", "B");
+        // victor generate a seed and send it to peggy.
+        let victor_seed = [
+            1, 2, 4, 8, 23, 0, 0, 0, 200, 1, 0, 0, 210, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 123,
+        ];
+        let proof = peggy.generate_proof(&victor_seed, "A", "B").unwrap();
+        // victor verify the proof.
+        let res = victor.verify_proof(&victor_seed, &proof, request_product);
+        assert!(res, "Proof is not valid!");
     }
 }
